@@ -1,0 +1,60 @@
+{
+  "version": 2,
+  "name": "home-nest-api",
+  "builds": [
+    {
+      "src": "api/**/*.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/properties",
+      "dest": "/api/properties.js"
+    },
+    {
+      "src": "/api/properties/(.*)",
+      "dest": "/api/properties.js"
+    },
+    {
+      "src": "/api/users",
+      "dest": "/api/users.js"
+    },
+    {
+      "src": "/api/users/(.*)",
+      "dest": "/api/users.js"
+    },
+    {
+      "src": "/api/bookings",
+      "dest": "/api/bookings.js"
+    },
+    {
+      "src": "/api/bookings/(.*)",
+      "dest": "/api/bookings.js"
+    },
+    {
+      "src": "/api/reviews",
+      "dest": "/api/reviews.js"
+    },
+    {
+      "src": "/api/reviews/(.*)",
+      "dest": "/api/reviews.js"
+    },
+    {
+      "src": "/api/contact",
+      "dest": "/api/contact.js"
+    },
+    {
+      "src": "/api/contact/(.*)",
+      "dest": "/api/contact.js"
+    },
+    {
+      "src": "\/(.*)",
+      "dest": "/api/index.js"
+    }
+  ],
+  "env": {
+    "MONGODB_URI": "your_mongodb_connection_string_here",
+    "FIREBASE_SERVICE_KEY": "your_firebase_service_key_here"
+  }
+}

@@ -1,12 +1,13 @@
-
 // ===== 1️ Import Packages =====
 const express = require('express');
 const cors = require('cors');
 const admin = require("firebase-admin");
 require("dotenv").config();
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
-require('dotenv').config(); // For environment variables
-const serviceAccount = require("./serviceKey.json"); // Firebase service account
+
+// index.js Firebase Setup
+const decoded = Buffer.from(process.env.FIREBASE_SERVICE_KEY, "base64").toString("utf8");
+const serviceAccount = JSON.parse(decoded);
 
 // ===== 2️ App Configuration =====
 const app = express();
@@ -35,16 +36,14 @@ const client = new MongoClient(uri, {
 // ===== 6️ Firebase Token Verification Function =====
 const verifyToken = async (req, res, next) => {
   const authorization = req.headers.authorization;
-
   if (!authorization) {
     return res.status(401).send({ message: "Unauthorized. Token not found!" });
   }
-
   const token = authorization.split(" ")[1];
-
   try {
-    await admin.auth().verifyIdToken(token); // Verify Firebase ID token
-    next(); // token valid → continue
+    const decodedToken = await admin.auth().verifyIdToken(token);
+    req.decodedUser = decodedToken;
+    next();
   } catch (error) {
     res.status(401).send({ message: "Unauthorized access." });
   }
@@ -53,25 +52,38 @@ const verifyToken = async (req, res, next) => {
 // ===== 7️ MongoDB Collections and Routes =====
 async function run() {
   try {
-    await client.connect();
     const db = client.db("homeNestDB");
 
     const usersCollection = db.collection("usersCollection");
     const propertiesCollection = db.collection("propertiesCollection");
     const reviewsCollection = db.collection("reviewsCollection");
+    const bookingsCollection = db.collection("bookingsCollection");
 
-    console.log(" MongoDB connected successfully!");
+    console.log("✅ MongoDB connected successfully!");
+    
+    // Create default admin user if it doesn't exist
+    const adminUser = {
+      name: "Admin",
+      email: "admin@gmail.com",
+      role: "admin",
+      createdAt: new Date()
+    };
+    
+    const existingAdmin = await usersCollection.findOne({ email: "admin@gmail.com" });
+    if (!existingAdmin) {
+      await usersCollection.insertOne(adminUser);
+      console.log("✅ Default admin user created: admin@gmail.com");
+    } else {
+      console.log("✅ Admin user already exists");
+    }
 
     /*********************
       USERS ROUTES
     *********************/
-    // Register user
     app.post("/users", async (req, res) => {
       const newUser = req.body;
       const existingUser = await usersCollection.findOne({ email: newUser.email });
-      if (existingUser) {
-        return res.send({ message: "User already exists" });
-      }
+      if (existingUser) return res.send({ message: "User already exists" });
       const result = await usersCollection.insertOne({ ...newUser, createdAt: new Date() });
       res.send(result);
     });
@@ -79,108 +91,202 @@ async function run() {
     /*********************
       PROPERTIES ROUTES
     *********************/
-    // Get all properties (public)
     app.get("/properties", async (req, res) => {
-      const { search, sortBy } = req.query;
+      const { search, sortBy, category } = req.query;
       let query = {};
-      let options = {};
-
       if (search) query.propertyName = { $regex: search, $options: "i" };
-      if (sortBy === "price") options.sort = { price: 1 };
-      if (sortBy === "date") options.sort = { createdAt: -1 };
+      if (category) query.category = category; // Filter by category
+      let sortOptions = {};
+      if (sortBy === "price") sortOptions = { price: 1 };
+      else if (sortBy === "date") sortOptions = { createdAt: -1 };
 
-      const result = await propertiesCollection.find(query, options).toArray();
+      const result = await propertiesCollection.find(query).sort(sortOptions).toArray();
       res.send(result);
     });
 
-    // Get latest 6 properties
-    app.get("/latest-properties", async (req, res) => {
-      const result = await propertiesCollection.find().sort({ createdAt: -1 }).limit(6).toArray();
+    app.get("/properties/:id", async (req, res) => {
+      const id = req.params.id;
+      const result = await propertiesCollection.findOne({ _id: new ObjectId(id) });
       res.send(result);
     });
 
-    // Get my properties (private)
+    // My added properties
     app.get("/my-properties", verifyToken, async (req, res) => {
       const email = req.query.email;
       const result = await propertiesCollection.find({ userEmail: email }).toArray();
       res.send(result);
     });
 
-    // Get single property (private)
-    app.get("/properties/:id", verifyToken, async (req, res) => {
-      const id = req.params.id;
-      const result = await propertiesCollection.findOne({ _id: new ObjectId(id) });
-      res.send(result);
-    });
-
-    // Add property (private)
-   app.post("/properties", verifyToken, async (req, res) => {
-    //app.post("/properties", async (req, res) => {
+    app.post("/properties", verifyToken, async (req, res) => {
       const newProperty = { ...req.body, createdAt: new Date() };
       const result = await propertiesCollection.insertOne(newProperty);
       res.send(result);
     });
 
-    // Update property (private)
+    // Property Update Route
     app.put("/properties/:id", verifyToken, async (req, res) => {
       const id = req.params.id;
-      const updated = req.body;
-      const result = await propertiesCollection.updateOne(
-        { _id: new ObjectId(id) },
-        { $set: { 
-            propertyName: updated.propertyName,
-            description: updated.description,
-            category: updated.category,
-            price: updated.price,
-            location: updated.location,
-            image: updated.image
-          }
-        }
-      );
+      const propertyData = req.body;
+      const filter = { _id: new ObjectId(id) };
+      const options = { upsert: false };
+      const updateDoc = {
+        $set: {
+          propertyName: propertyData.propertyName,
+          description: propertyData.description,
+          category: propertyData.category,
+          price: propertyData.price,
+          location: propertyData.location,
+          image: propertyData.image,
+          // Only update fields that exist in the request
+          ...(propertyData.status && { status: propertyData.status }),
+          updatedAt: new Date()
+        },
+      };
+      const result = await propertiesCollection.updateOne(filter, updateDoc, options);
       res.send(result);
     });
-
-    // Delete property (private)
+    
+    // Property Delete Route (এটা আপনার দরকার ছিল)
     app.delete("/properties/:id", verifyToken, async (req, res) => {
       const id = req.params.id;
       const result = await propertiesCollection.deleteOne({ _id: new ObjectId(id) });
       res.send(result);
     });
 
-    /*REVIEWS ROUTES*/
-    // Add review (private)
+    /*********************
+      BOOKINGS ROUTES
+    *********************/
+    app.post("/bookings", verifyToken, async (req, res) => {
+      const bookingData = { 
+        ...req.body, 
+        status: "Pending", // Default Status
+        paymentStatus: "Unpaid",
+        createdAt: new Date() 
+      };
+      const result = await bookingsCollection.insertOne(bookingData);
+      res.send(result);
+    });
+
+    app.get("/my-bookings", verifyToken, async (req, res) => {
+      const email = req.query.email;
+      const result = await bookingsCollection.find({ userEmail: email }).toArray();
+      res.send(result);
+    });
+
+    app.delete("/bookings/:id", verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const result = await bookingsCollection.deleteOne({ _id: new ObjectId(id) });
+      res.send(result);
+    });
+
+    /*********************
+      REVIEWS ROUTES
+    *********************/
     app.post("/reviews", verifyToken, async (req, res) => {
       const newReview = { ...req.body, createdAt: new Date() };
       const result = await reviewsCollection.insertOne(newReview);
       res.send(result);
     });
 
-    // Get all reviews for a property
-    app.get("/reviews/:propertyId", async (req, res) => {
-      const propertyId = req.params.propertyId;
-      const result = await reviewsCollection.find({ propertyId }).toArray();
-      res.send(result);
-    });
-
-    // Get my reviews (private)
     app.get("/my-reviews", verifyToken, async (req, res) => {
       const email = req.query.email;
       const result = await reviewsCollection.find({ reviewerEmail: email }).toArray();
       res.send(result);
     });
 
-  } finally {
-    // await client.close(); // Uncomment if needed
-  }
+    app.delete("/reviews/:id", verifyToken, async (req, res) => {
+      const id = req.params.id;
+      const result = await reviewsCollection.deleteOne({ _id: new ObjectId(id) });
+      res.send(result);
+    });
+
+    /*********************
+      ADMIN ROUTES
+    *********************/
+    // Verify admin middleware
+    const verifyAdmin = async (req, res, next) => {
+      const token = req.headers.authorization?.split(" ")[1];
+      if (!token) {
+        return res.status(401).send({ message: "Unauthorized. Token not found!" });
+      }
+      
+      try {
+        const decodedToken = await admin.auth().verifyIdToken(token);
+        const userEmail = decodedToken.email;
+        
+        // Check if user is admin in the database
+        const user = await usersCollection.findOne({ email: userEmail });
+        if (!user || user.role !== 'admin') {
+          return res.status(403).send({ message: "Access denied. Admin only." });
+        }
+        
+        req.decodedUser = decodedToken;
+        next();
+      } catch (error) {
+        res.status(401).send({ message: "Unauthorized access." });
+      }
+    };
+    
+    // Get all users (admin only)
+    app.get("/users", verifyAdmin, async (req, res) => {
+      const result = await usersCollection.find({}).toArray();
+      res.send(result);
+    });
+    
+    // Update user role (admin only)
+    app.patch("/users/:email", verifyAdmin, async (req, res) => {
+      const email = req.params.email;
+      const { role } = req.body;
+      
+      const result = await usersCollection.updateOne(
+        { email: email },
+        { $set: { role: role } }
+      );
+      
+      res.send(result);
+    });
+    
+    // Get all bookings (admin only)
+    app.get("/all-bookings", verifyAdmin, async (req, res) => {
+      const result = await bookingsCollection.find({}).toArray();
+      res.send(result);
+    });
+    
+    // Update booking status (admin only)
+    app.patch("/bookings/:id", verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      const { status } = req.body;
+      
+      const result = await bookingsCollection.updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status: status } }
+      );
+      
+      res.send(result);
+    });
+    
+    // Get all properties (admin only)
+    app.get("/all-properties", verifyAdmin, async (req, res) => {
+      const result = await propertiesCollection.find({}).toArray();
+      res.send(result);
+    });
+    
+    // Get all reviews (admin only)
+    app.get("/all-reviews", verifyAdmin, async (req, res) => {
+      const result = await reviewsCollection.find({}).toArray();
+      res.send(result);
+    });
+    
+    // Delete review (admin only)
+    app.delete("/admin/reviews/:id", verifyAdmin, async (req, res) => {
+      const id = req.params.id;
+      const result = await reviewsCollection.deleteOne({ _id: new ObjectId(id) });
+      res.send(result);
+    });
+
+  } finally { }
 }
 run().catch(console.dir);
 
-// ===== 8️⃣ Root Route =====
-app.get("/", (req, res) => {
-  res.send("HomeNest backend server is running!");
-});
-
-// ===== 9️⃣ Server Listening =====
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
+app.get("/", (req, res) => res.send("HomeNest backend server is running!"));
+app.listen(port, () => console.log(`🚀 Server running on port ${port}`));
